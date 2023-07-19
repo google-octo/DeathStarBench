@@ -3,6 +3,7 @@ package rate
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -11,9 +12,12 @@ import (
 	"net"
 	// "os"
 	"sort"
-	"time"
 	"sync"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 
 	"github.com/google/uuid"
@@ -35,14 +39,41 @@ const name = "srv-rate"
 
 // Server implements the rate service
 type Server struct {
-	Tracer       opentracing.Tracer
-	Port         int
-	IpAddr       string
-	MongoSession *mgo.Session
-	Registry     *registry.Client
-	MemcClient   *memcache.Client
-	uuid         string
+	Tracer         opentracing.Tracer
+	Port           int
+	PrometheusPort int
+	IpAddr         string
+	MongoSession   *mgo.Session
+	Registry       *registry.Client
+	MemcClient     *memcache.Client
+	uuid           string
 }
+
+var (
+	clientRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "client_request_total",
+		Help: "The total number of client requests, by service and method."},
+		[]string{"service", "method"})
+	clientLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "client_latency",
+		Help: "Client request latency, by service and method."},
+		[]string{"service", "method"})
+
+	serverRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "server_request_total",
+		Help: "The total number of client requests, by method."},
+		[]string{"method"})
+	serverLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "server_latency",
+		Help: "Server request latency, by method."},
+		[]string{"method"})
+
+	// "Exclusive" latency is the strict server latency, excluding client latency.
+	serverExclusiveLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "server_exclusive_latency",
+		Help: "Server exclusive request latency, by method."},
+		[]string{"method"})
+)
 
 // Run starts the server
 func (s *Server) Run() error {
@@ -79,6 +110,10 @@ func (s *Server) Run() error {
 		log.Fatal().Msgf("failed to listen: %v", err)
 	}
 
+	// Configure Prometheus
+	http.Handle("/metrics", promhttp.Handler())
+	http.ListenAndServe(fmt.Sprintf(":%d", s.PrometheusPort), nil)
+
 	// register the service
 	// jsonFile, err := os.Open("config.json")
 	// if err != nil {
@@ -108,6 +143,9 @@ func (s *Server) Shutdown() {
 
 // GetRates gets rates for hotels for specific date range.
 func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, error) {
+	start := time.Now()
+	elapsedExclusive := float64(0)
+
 	res := new(pb.Result)
 	// session, err := mgo.Dial("mongodb-rate")
 	// if err != nil {
@@ -124,10 +162,10 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 		rateMap[hotelID] = struct{}{}
 	}
 	// first check memcached(get-multi)
-	memSpan, _ := opentracing.StartSpanFromContext(ctx, "memcached_get_multi_rate")
+	memSpan := StartSpan(ctx, []string{"memcached", "get_multi_rate"}, clientRequests, clientLatency)
 	memSpan.SetTag("span.kind", "client")
 	resMap, err := s.MemcClient.GetMulti(hotelIds)
-	memSpan.Finish()
+	elapsedExclusive += memSpan.Finish()
 	var wg sync.WaitGroup
 	var mutex sync.Mutex
 	if err != nil && err != memcache.ErrCacheMiss {
@@ -186,6 +224,11 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 
 	sort.Sort(ratePlans)
 	res.RatePlans = ratePlans
+
+	elapsed := time.Now().Sub(start).Seconds()
+	serverLatency.WithLabelValues("CheckAvailability").Observe(elapsed)
+	serverExclusiveLatency.WithLabelValues("CheckAvailability").
+		Observe(elapsed - elapsedExclusive)
 
 	return res, nil
 }

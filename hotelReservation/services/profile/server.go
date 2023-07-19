@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -10,9 +11,12 @@ import (
 	// "io/ioutil"
 	"net"
 	// "os"
-	"time"
 	"sync"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 
 	"github.com/google/uuid"
@@ -33,14 +37,41 @@ const name = "srv-profile"
 
 // Server implements the profile service
 type Server struct {
-	Tracer       opentracing.Tracer
-	uuid         string
-	Port         int
-	IpAddr       string
-	MongoSession *mgo.Session
-	Registry     *registry.Client
-	MemcClient   *memcache.Client
+	Tracer         opentracing.Tracer
+	uuid           string
+	Port           int
+	PrometheusPort int
+	IpAddr         string
+	MongoSession   *mgo.Session
+	Registry       *registry.Client
+	MemcClient     *memcache.Client
 }
+
+var (
+	clientRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "client_request_total",
+		Help: "The total number of client requests, by service and method."},
+		[]string{"service", "method"})
+	clientLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "client_latency",
+		Help: "Client request latency, by service and method."},
+		[]string{"service", "method"})
+
+	serverRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "server_request_total",
+		Help: "The total number of client requests, by method."},
+		[]string{"method"})
+	serverLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "server_latency",
+		Help: "Server request latency, by method."},
+		[]string{"method"})
+
+	// "Exclusive" latency is the strict server latency, excluding client latency.
+	serverExclusiveLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "server_exclusive_latency",
+		Help: "Server exclusive request latency, by method."},
+		[]string{"method"})
+)
 
 // Run starts the server
 func (s *Server) Run() error {
@@ -79,6 +110,10 @@ func (s *Server) Run() error {
 		log.Fatal().Msgf("failed to configure listener: %v", err)
 	}
 
+	// Configure Prometheus
+	http.Handle("/metrics", promhttp.Handler())
+	http.ListenAndServe(fmt.Sprintf(":%d", s.PrometheusPort), nil)
+
 	// register the service
 	// jsonFile, err := os.Open("config.json")
 	// if err != nil {
@@ -108,6 +143,9 @@ func (s *Server) Shutdown() {
 
 // GetProfiles returns hotel profiles for requested IDs
 func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, error) {
+	start := time.Now()
+	elapsedExclusive := float64(0)
+
 	// session, err := mgo.Dial("mongodb-profile")
 	// if err != nil {
 	// 	panic(err)
@@ -128,10 +166,10 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 		hotelIds = append(hotelIds, hotelId)
 		profileMap[hotelId] = struct{}{}
 	}
-	memSpan, _ := opentracing.StartSpanFromContext(ctx, "memcached_get_profile")
+	memSpan := StartSpan(ctx, []string{"memcached", "get_profile"}, clientRequests, clientLatency)
 	memSpan.SetTag("span.kind", "client")
 	resMap, err := s.MemcClient.GetMulti(hotelIds)
-	memSpan.Finish()
+	elapsedExclusive += memSpan.Finish()
 	if err != nil && err != memcache.ErrCacheMiss {
 		log.Panic().Msgf("Tried to get hotelIds [%v], but got memmcached error = %s", hotelIds, err)
 	} else {
@@ -153,10 +191,10 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 				c := session.DB("profile-db").C("hotels")
 
 				hotelProf := new(pb.Hotel)
-				mongoSpan, _ := opentracing.StartSpanFromContext(ctx, "mongo_profile")
+				mongoSpan := StartSpan(ctx, []string{"mongo", "profile"}, clientRequests, clientLatency)
 				mongoSpan.SetTag("span.kind", "client")
 				err := c.Find(bson.M{"id": hotelId}).One(&hotelProf)
-				mongoSpan.Finish()
+				elapsedExclusive += mongoSpan.Finish()
 
 				if err != nil {
 					log.Error().Msgf("Failed get hotels data: ", err)
@@ -182,5 +220,11 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 
 	res.Hotels = hotels
 	log.Trace().Msgf("In GetProfiles after getting resp")
+
+	elapsed := time.Now().Sub(start).Seconds()
+	serverLatency.WithLabelValues("CheckAvailability").Observe(elapsed)
+	serverExclusiveLatency.WithLabelValues("CheckAvailability").
+		Observe(elapsed - elapsedExclusive)
+
 	return res, nil
 }

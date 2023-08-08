@@ -3,7 +3,6 @@ package rate
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -15,9 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/bjornleffler/tracing"
 	"github.com/rs/zerolog/log"
 
 	"github.com/google/uuid"
@@ -48,32 +45,6 @@ type Server struct {
 	MemcClient     *memcache.Client
 	uuid           string
 }
-
-var (
-	clientRequests = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "client_request_total",
-		Help: "The total number of client requests, by service and method."},
-		[]string{"service", "method"})
-	clientLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "client_latency",
-		Help: "Client request latency, by service and method."},
-		[]string{"service", "method"})
-
-	serverRequests = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "server_request_total",
-		Help: "The total number of client requests, by method."},
-		[]string{"method"})
-	serverLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "server_latency",
-		Help: "Server request latency, by method."},
-		[]string{"method"})
-
-	// "Exclusive" latency is the strict server latency, excluding client latency.
-	serverExclusiveLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "server_exclusive_latency",
-		Help: "Server exclusive request latency, by method."},
-		[]string{"method"})
-)
 
 // Run starts the server
 func (s *Server) Run() error {
@@ -110,9 +81,8 @@ func (s *Server) Run() error {
 		log.Fatal().Msgf("failed to listen: %v", err)
 	}
 
-	// Configure Prometheus
-	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(fmt.Sprintf(":%d", s.PrometheusPort), nil)
+	// Configure Prometheus exports and tracing.
+	tracing.Configure("rate", s.PrometheusPort)
 
 	// register the service
 	// jsonFile, err := os.Open("config.json")
@@ -143,8 +113,8 @@ func (s *Server) Shutdown() {
 
 // GetRates gets rates for hotels for specific date range.
 func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, error) {
-	start := time.Now()
-	elapsedExclusive := float64(0)
+	serverSpan := tracing.StartServerSpan(ctx, "GetRates")
+	defer serverSpan.Finish()
 
 	res := new(pb.Result)
 	// session, err := mgo.Dial("mongodb-rate")
@@ -162,10 +132,9 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 		rateMap[hotelID] = struct{}{}
 	}
 	// first check memcached(get-multi)
-	memSpan := StartSpan(ctx, []string{"memcached", "get_multi_rate"}, clientRequests, clientLatency)
-	memSpan.SetTag("span.kind", "client")
+	clientSpan := tracing.StartClientSpan(ctx, serverSpan, "memcached", "get_multi_rate")
 	resMap, err := s.MemcClient.GetMulti(hotelIds)
-	elapsedExclusive += memSpan.Finish()
+	clientSpan.Finish()
 	var wg sync.WaitGroup
 	var mutex sync.Mutex
 	if err != nil && err != memcache.ErrCacheMiss {
@@ -196,10 +165,9 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 				c := session.DB("rate-db").C("inventory")
 				memcStr := ""
 				tmpRatePlans := make(RatePlans, 0)
-				mongoSpan, _ := opentracing.StartSpanFromContext(ctx, "mongo_rate")
-				mongoSpan.SetTag("span.kind", "client")
+				clientSpan := tracing.StartClientSpan(ctx, serverSpan, "mongodb", "rate")
 				err := c.Find(&bson.M{"hotelId": id}).All(&tmpRatePlans)
-				mongoSpan.Finish()
+				clientSpan.Finish()
 				if err != nil {
 					log.Panic().Msgf("Tried to find hotelId [%v], but got error", id, err.Error())
 				} else {
@@ -224,12 +192,6 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 
 	sort.Sort(ratePlans)
 	res.RatePlans = ratePlans
-
-	elapsed := time.Now().Sub(start).Seconds()
-	serverLatency.WithLabelValues("CheckAvailability").Observe(elapsed)
-	serverExclusiveLatency.WithLabelValues("CheckAvailability").
-		Observe(elapsed - elapsedExclusive)
-
 	return res, nil
 }
 

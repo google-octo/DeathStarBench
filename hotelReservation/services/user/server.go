@@ -2,28 +2,23 @@ package user
 
 import (
 	"crypto/sha256"
-	// "encoding/json"
 	"fmt"
+	"net"
+	"time"
 
+	"github.com/bjornleffler/tracing"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/harlow/go-micro-services/registry"
 	pb "github.com/harlow/go-micro-services/services/user/proto"
 	"github.com/harlow/go-micro-services/tls"
 	"github.com/opentracing/opentracing-go"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
-
-	// "io/ioutil"
-	"net"
-
-	"github.com/rs/zerolog/log"
-
-	// "os"
-	"time"
 )
 
 const name = "srv-user"
@@ -32,12 +27,13 @@ const name = "srv-user"
 type Server struct {
 	users map[string]string
 
-	Tracer       opentracing.Tracer
-	Registry     *registry.Client
-	Port         int
-	IpAddr       string
-	MongoSession *mgo.Session
-	uuid         string
+	Tracer         opentracing.Tracer
+	Registry       *registry.Client
+	Port           int
+	PrometheusPort int
+	IpAddr         string
+	MongoSession   *mgo.Session
+	uuid           string
 }
 
 // Run starts the server
@@ -77,6 +73,9 @@ func (s *Server) Run() error {
 		log.Fatal().Msgf("failed to listen: %v", err)
 	}
 
+	// Configure Prometheus exports and tracing.
+	tracing.Configure("user", s.PrometheusPort)
+
 	// // register the service
 	// jsonFile, err := os.Open("config.json")
 	// if err != nil {
@@ -106,6 +105,8 @@ func (s *Server) Shutdown() {
 
 // CheckUser returns whether the username and password are correct.
 func (s *Server) CheckUser(ctx context.Context, req *pb.Request) (*pb.Result, error) {
+	serverSpan := tracing.StartServerSpan(ctx, "CheckUser")
+	defer serverSpan.Finish()
 	res := new(pb.Result)
 
 	log.Trace().Msg("CheckUser")

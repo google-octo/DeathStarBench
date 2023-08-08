@@ -12,6 +12,7 @@ import (
 	// "os"
 	"time"
 
+	"github.com/bjornleffler/tracing"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/hailocab/go-geoindex"
@@ -36,11 +37,12 @@ type Server struct {
 	index *geoindex.ClusteringIndex
 	uuid  string
 
-	Registry *registry.Client
-	Tracer   opentracing.Tracer
-	Port     int
-	IpAddr	 string
-	MongoSession 	*mgo.Session
+	Registry       *registry.Client
+	Tracer         opentracing.Tracer
+	Port           int
+	PrometheusPort int
+	IpAddr         string
+	MongoSession   *mgo.Session
 }
 
 // Run starts the server
@@ -87,6 +89,9 @@ func (s *Server) Run() error {
 		return fmt.Errorf("failed to listen: %v", err)
 	}
 
+	// Configure Prometheus exports and tracing.
+	tracing.Configure("geo", s.PrometheusPort)
+
 	// register the service
 	// jsonFile, err := os.Open("config.json")
 	// if err != nil {
@@ -118,12 +123,16 @@ func (s *Server) Shutdown() {
 
 // Nearby returns all hotels within a given distance.
 func (s *Server) Nearby(ctx context.Context, req *pb.Request) (*pb.Result, error) {
+	serverSpan := tracing.StartServerSpan(ctx, "Nearby")
+	defer serverSpan.Finish()
 	log.Trace().Msgf("In geo Nearby")
 
+	clientSpan := tracing.StartClientSpan(ctx, serverSpan, "geo", "NearbyPoints")
 	var (
 		points = s.getNearbyPoints(ctx, float64(req.Lat), float64(req.Lon))
 		res    = &pb.Result{}
 	)
+	clientSpan.Finish()
 
 	log.Trace().Msgf("geo after getNearbyPoints, len = %d", len(points))
 
@@ -136,6 +145,8 @@ func (s *Server) Nearby(ctx context.Context, req *pb.Request) (*pb.Result, error
 }
 
 func (s *Server) getNearbyPoints(ctx context.Context, lat, lon float64) []geoindex.Point {
+	serverSpan := tracing.StartServerSpan(ctx, "NearbyPoints")
+	defer serverSpan.Finish()
 	log.Trace().Msgf("In geo getNearbyPoints, lat = %f, lon = %f", lat, lon)
 
 	center := &geoindex.GeoPoint{

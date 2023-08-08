@@ -47,7 +47,9 @@ func main() {
 
 	serv_port, _ := strconv.Atoi(result["ProfilePort"])
 	serv_ip := result["ProfileIP"]
+	prometheus_port, _ := strconv.Atoi(result["PrometheusPort"])
 	log.Info().Msgf("Read target port: %v", serv_port)
+	log.Info().Msgf("Read prometheus port: %v", prometheus_port)
 	log.Info().Msgf("Read consul address: %v", result["consulAddress"])
 	log.Info().Msgf("Read jaeger address: %v", result["jaegerAddress"])
 
@@ -75,11 +77,12 @@ func main() {
 	srv := profile.Server{
 		Tracer: tracer,
 		// Port:     *port,
-		Registry:     registry,
-		Port:         serv_port,
-		IpAddr:       serv_ip,
-		MongoSession: mongo_session,
-		MemcClient:   memc_client,
+		Registry:       registry,
+		Port:           serv_port,
+		PrometheusPort: prometheus_port,
+		IpAddr:         serv_ip,
+		MongoSession:   mongo_session,
+		MemcClient:     memc_client,
 	}
 
 	log.Info().Msg("Starting server...")

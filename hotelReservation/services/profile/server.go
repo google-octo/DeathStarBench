@@ -3,7 +3,6 @@ package profile
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -14,9 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bjornleffler/tracing"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 
 	"github.com/google/uuid"
@@ -110,9 +109,8 @@ func (s *Server) Run() error {
 		log.Fatal().Msgf("failed to configure listener: %v", err)
 	}
 
-	// Configure Prometheus
-	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(fmt.Sprintf(":%d", s.PrometheusPort), nil)
+	// Configure Prometheus exports and tracing.
+	tracing.Configure("profile", s.PrometheusPort)
 
 	// register the service
 	// jsonFile, err := os.Open("config.json")
@@ -143,8 +141,8 @@ func (s *Server) Shutdown() {
 
 // GetProfiles returns hotel profiles for requested IDs
 func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, error) {
-	start := time.Now()
-	elapsedExclusive := float64(0)
+	serverSpan := tracing.StartServerSpan(ctx, "GetProfiles")
+	defer serverSpan.Finish()
 
 	// session, err := mgo.Dial("mongodb-profile")
 	// if err != nil {
@@ -166,10 +164,9 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 		hotelIds = append(hotelIds, hotelId)
 		profileMap[hotelId] = struct{}{}
 	}
-	memSpan := StartSpan(ctx, []string{"memcached", "get_profile"}, clientRequests, clientLatency)
-	memSpan.SetTag("span.kind", "client")
+	clientSpan := tracing.StartClientSpan(ctx, serverSpan, "memcached", "get_profile")
 	resMap, err := s.MemcClient.GetMulti(hotelIds)
-	elapsedExclusive += memSpan.Finish()
+	clientSpan.Finish()
 	if err != nil && err != memcache.ErrCacheMiss {
 		log.Panic().Msgf("Tried to get hotelIds [%v], but got memmcached error = %s", hotelIds, err)
 	} else {
@@ -191,10 +188,9 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 				c := session.DB("profile-db").C("hotels")
 
 				hotelProf := new(pb.Hotel)
-				mongoSpan := StartSpan(ctx, []string{"mongo", "profile"}, clientRequests, clientLatency)
-				mongoSpan.SetTag("span.kind", "client")
+				clientSpan := tracing.StartClientSpan(ctx, serverSpan, "mongo", "profile")
 				err := c.Find(bson.M{"id": hotelId}).One(&hotelProf)
-				elapsedExclusive += mongoSpan.Finish()
+				clientSpan.Finish()
 
 				if err != nil {
 					log.Error().Msgf("Failed get hotels data: ", err)
@@ -220,11 +216,5 @@ func (s *Server) GetProfiles(ctx context.Context, req *pb.Request) (*pb.Result, 
 
 	res.Hotels = hotels
 	log.Trace().Msgf("In GetProfiles after getting resp")
-
-	elapsed := time.Now().Sub(start).Seconds()
-	serverLatency.WithLabelValues("CheckAvailability").Observe(elapsed)
-	serverExclusiveLatency.WithLabelValues("CheckAvailability").
-		Observe(elapsed - elapsedExclusive)
-
 	return res, nil
 }

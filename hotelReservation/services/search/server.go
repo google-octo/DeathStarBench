@@ -11,6 +11,7 @@ import (
 	// "os"
 	"time"
 
+	"github.com/bjornleffler/tracing"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/harlow/go-micro-services/dialer"
@@ -32,12 +33,13 @@ type Server struct {
 	geoClient  geo.GeoClient
 	rateClient rate.RateClient
 
-	Tracer     opentracing.Tracer
-	Port       int
-	IpAddr     string
-	KnativeDns string
-	Registry   *registry.Client
-	uuid       string
+	Tracer         opentracing.Tracer
+	Port           int
+	PrometheusPort int
+	IpAddr         string
+	KnativeDns     string
+	Registry       *registry.Client
+	uuid           string
 }
 
 // Run starts the server
@@ -79,6 +81,9 @@ func (s *Server) Run() error {
 	if err != nil {
 		log.Fatal().Msgf("failed to listen: %v", err)
 	}
+
+	// Configure Prometheus exports and tracing.
+	tracing.Configure("search", s.PrometheusPort)
 
 	// register with consul
 	// jsonFile, err := os.Open("config.json")
@@ -141,16 +146,21 @@ func (s *Server) getGprcConn(name string) (*grpc.ClientConn, error) {
 
 // Nearby returns ids of nearby hotels ordered by ranking algo
 func (s *Server) Nearby(ctx context.Context, req *pb.NearbyRequest) (*pb.SearchResult, error) {
+	serverSpan := tracing.StartServerSpan(ctx, "Nearby")
+	defer serverSpan.Finish()
+
 	// find nearby hotels
 	log.Trace().Msg("in Search Nearby")
 
 	log.Trace().Msgf("nearby lat = %f", req.Lat)
 	log.Trace().Msgf("nearby lon = %f", req.Lon)
 
+	clientSpan := tracing.StartClientSpan(ctx, serverSpan, "geo", "Nearby")
 	nearby, err := s.geoClient.Nearby(ctx, &geo.Request{
 		Lat: req.Lat,
 		Lon: req.Lon,
 	})
+	clientSpan.Finish()
 	if err != nil {
 		return nil, err
 	}
@@ -160,11 +170,13 @@ func (s *Server) Nearby(ctx context.Context, req *pb.NearbyRequest) (*pb.SearchR
 	}
 
 	// find rates for hotels
+	clientSpan = tracing.StartClientSpan(ctx, serverSpan, "rate", "GetRates")
 	rates, err := s.rateClient.GetRates(ctx, &rate.Request{
 		HotelIds: nearby.HotelIds,
 		InDate:   req.InDate,
 		OutDate:  req.OutDate,
 	})
+	clientSpan.Finish()
 	if err != nil {
 		return nil, err
 	}

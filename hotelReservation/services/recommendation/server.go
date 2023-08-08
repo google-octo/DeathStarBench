@@ -4,6 +4,7 @@ import (
 	// "encoding/json"
 	"fmt"
 
+	"github.com/bjornleffler/tracing"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/hailocab/go-geoindex"
@@ -31,13 +32,14 @@ const name = "srv-recommendation"
 
 // Server implements the recommendation service
 type Server struct {
-	hotels       map[string]Hotel
-	Tracer       opentracing.Tracer
-	Port         int
-	IpAddr       string
-	MongoSession *mgo.Session
-	Registry     *registry.Client
-	uuid         string
+	hotels         map[string]Hotel
+	Tracer         opentracing.Tracer
+	Port           int
+	PrometheusPort int
+	IpAddr         string
+	MongoSession   *mgo.Session
+	Registry       *registry.Client
+	uuid           string
 }
 
 // Run starts the server
@@ -77,6 +79,9 @@ func (s *Server) Run() error {
 		log.Fatal().Msgf("failed to listen: %v", err)
 	}
 
+	// Configure Prometheus exports and tracing.
+	tracing.Configure("recommendation", s.PrometheusPort)
+
 	// // register the service
 	// jsonFile, err := os.Open("config.json")
 	// if err != nil {
@@ -106,6 +111,9 @@ func (s *Server) Shutdown() {
 
 // GiveRecommendation returns recommendations within a given requirement.
 func (s *Server) GetRecommendations(ctx context.Context, req *pb.Request) (*pb.Result, error) {
+	serverSpan := tracing.StartServerSpan(ctx, "GetRecommendations")
+	defer serverSpan.Finish()
+
 	res := new(pb.Result)
 	log.Trace().Msgf("GetRecommendations")
 	require := req.Require

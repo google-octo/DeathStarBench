@@ -42,7 +42,9 @@ func main() {
 
 	serv_port, _ := strconv.Atoi(result["UserPort"])
 	serv_ip := result["UserIP"]
+	prometheus_port, _ := strconv.Atoi(result["PrometheusPort"])
 	log.Info().Msgf("Read target port: %v", serv_port)
+	log.Info().Msgf("Read prometheus port: %v", prometheus_port)
 	log.Info().Msgf("Read consul address: %v", result["consulAddress"])
 	log.Info().Msgf("Read jaeger address: %v", result["jaegerAddress"])
 
@@ -70,10 +72,11 @@ func main() {
 	srv := &user.Server{
 		Tracer: tracer,
 		// Port:     *port,
-		Registry:     registry,
-		Port:         serv_port,
-		IpAddr:       serv_ip,
-		MongoSession: mongo_session,
+		Registry:       registry,
+		Port:           serv_port,
+		PrometheusPort: prometheus_port,
+		IpAddr:         serv_ip,
+		MongoSession:   mongo_session,
 	}
 
 	log.Info().Msg("Starting server...")

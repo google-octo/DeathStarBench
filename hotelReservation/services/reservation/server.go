@@ -3,17 +3,14 @@ package reservation
 import (
 	// "encoding/json"
 	"fmt"
-	"net/http"
 
+	"github.com/bjornleffler/tracing"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/harlow/go-micro-services/registry"
 	pb "github.com/harlow/go-micro-services/services/reservation/proto"
 	"github.com/harlow/go-micro-services/tls"
 	"github.com/opentracing/opentracing-go"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -46,32 +43,6 @@ type Server struct {
 	MemcClient     *memcache.Client
 	uuid           string
 }
-
-var (
-	clientRequests = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "client_request_total",
-		Help: "The total number of client requests, by service and method."},
-		[]string{"service", "method"})
-	clientLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "client_latency",
-		Help: "Client request latency, by service and method."},
-		[]string{"service", "method"})
-
-	serverRequests = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "server_request_total",
-		Help: "The total number of client requests, by method."},
-		[]string{"method"})
-	serverLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "server_latency",
-		Help: "Server request latency, by method."},
-		[]string{"method"})
-
-	// "Exclusive" latency is the strict server latency, excluding client latency.
-	serverExclusiveLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "server_exclusive_latency",
-		Help: "Server exclusive request latency, by method."},
-		[]string{"method"})
-)
 
 // Run starts the server
 func (s *Server) Run() error {
@@ -107,9 +78,8 @@ func (s *Server) Run() error {
 		log.Fatal().Msgf("failed to listen: %v", err)
 	}
 
-	// Configure Prometheus
-	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(fmt.Sprintf(":%d", s.PrometheusPort), nil)
+	// Configure Prometheus exports and tracing.
+	tracing.Configure("reservation", s.PrometheusPort)
 
 	// register the service
 	// jsonFile, err := os.Open("config.json")
@@ -266,8 +236,8 @@ func (s *Server) MakeReservation(ctx context.Context, req *pb.Request) (*pb.Resu
 
 // CheckAvailability checks if given information is available
 func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Result, error) {
-	start := time.Now()
-	elapsedExclusive := float64(0)
+	serverSpan := tracing.StartServerSpan(ctx, "CheckAvailability")
+	defer serverSpan.Finish()
 
 	res := new(pb.Result)
 	res.HotelId = make([]string, 0)
@@ -292,11 +262,9 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 		keysMap[hotelId+"_cap"] = struct{}{}
 	}
 
-	capMemSpan := StartSpan(ctx, []string{"memcached", "capacity_get_multi_number"},
-		clientRequests, clientLatency)
-	capMemSpan.SetTag("span.kind", "client")
+	clientSpan := tracing.StartClientSpan(ctx, serverSpan, "memcached", "capacity_get_multi_number")
 	cacheMemRes, err := s.MemcClient.GetMulti(hotelMemKeys)
-	elapsedExclusive += capMemSpan.Finish()
+	clientSpan.Finish()
 
 	misKeys := []string{}
 	// gather cache miss key to query in mongodb
@@ -321,11 +289,9 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 			queryMissKeys = append(queryMissKeys, strings.Split(k, "_")[0])
 		}
 		nums := []number{}
-		capMongoSpan := StartSpan(ctx, []string{"mongodb", "capacity_get_multi_number"},
-			clientRequests, clientLatency)
-		capMongoSpan.SetTag("span.kind", "client")
+		clientSpan := tracing.StartClientSpan(ctx, serverSpan, "mongodb", "capacity_get_multi_number")
 		err = c1.Find(bson.M{"hotelId": bson.M{"$in": queryMissKeys}}).All(&nums)
-		elapsedExclusive += capMongoSpan.Finish()
+		clientSpan.Finish()
 		if err != nil {
 			log.Panic().Msgf("Tried to find hotelId [%v], but got error", misKeys, err.Error())
 		}
@@ -365,16 +331,14 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 		checkRes bool
 	}
 
-	reserveMemSpan := StartSpan(ctx, []string{"memcached", "reserve_get_multi_number"},
-		clientRequests, clientLatency)
+	clientSpan = tracing.StartClientSpan(ctx, serverSpan, "memcached", "reserve_get_multi_number")
 	ch := make(chan taskRes)
-	reserveMemSpan.SetTag("span.kind", "client")
 	// check capacity in memcached and mongodb
 	if itemsMap, err := s.MemcClient.GetMulti(reqCommand); err != nil && err != memcache.ErrCacheMiss {
-		elapsedExclusive += reserveMemSpan.Finish()
+		clientSpan.Finish()
 		log.Panic().Msgf("Tried to get memc_key [%v], but got memmcached error = %s", reqCommand, err)
 	} else {
-		elapsedExclusive += reserveMemSpan.Finish()
+		clientSpan.Finish()
 		// go through reservation count from memcached
 		go func() {
 			for k, v := range itemsMap {
@@ -413,11 +377,10 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 					defer tmpSess.Close()
 					queryItem := queryMap[comm]
 					c := tmpSess.DB("reservation-db").C("reservation")
-					reserveMongoSpan := StartSpan(ctx, []string{"mongodb", "capacity_get_multi_number" + comm},
-						clientRequests, clientLatency)
-					reserveMongoSpan.SetTag("span.kind", "client")
+					clientSpan := tracing.StartClientSpan(ctx, serverSpan, "mongodb", "capacity_get_multi_number")
+					// Should we set comm as Tag?
 					err := c.Find(&bson.M{"hotelId": queryItem["hotelId"], "inDate": queryItem["startDate"], "outDate": queryItem["endDate"]}).All(&reserve)
-					elapsedExclusive += reserveMongoSpan.Finish()
+					clientSpan.Finish()
 					if err != nil {
 						log.Panic().Msgf("Tried to find hotelId [%v] from date [%v] to date [%v], but got error",
 							queryItem["hotelId"], queryItem["startDate"], queryItem["endDate"], err.Error())
@@ -453,10 +416,6 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 		}
 	}
 
-	elapsed := time.Now().Sub(start).Seconds()
-	serverLatency.WithLabelValues("CheckAvailability").Observe(elapsed)
-	serverExclusiveLatency.WithLabelValues("CheckAvailability").
-		Observe(elapsed - elapsedExclusive)
 	return res, nil
 }
 

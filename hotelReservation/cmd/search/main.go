@@ -5,9 +5,8 @@ import (
 	"flag"
 	"io/ioutil"
 	"os"
-	"time"
-
 	"strconv"
+	"time"
 
 	"github.com/harlow/go-micro-services/registry"
 	"github.com/harlow/go-micro-services/services/search"
@@ -37,7 +36,10 @@ func main() {
 	serv_port, _ := strconv.Atoi(result["SearchPort"])
 	serv_ip := result["SearchIP"]
 	knative_dns := result["KnativeDomainName"]
+	prometheus_port, _ := strconv.Atoi(result["PrometheusPort"])
+
 	log.Info().Msgf("Read target port: %v", serv_port)
+	log.Info().Msgf("Read prometheus port: %v", prometheus_port)
 	log.Info().Msgf("Read consul address: %v", result["consulAddress"])
 	log.Info().Msgf("Read jaeger address: %v", result["jaegerAddress"])
 
@@ -65,10 +67,11 @@ func main() {
 	srv := &search.Server{
 		Tracer: tracer,
 		// Port:     *port,
-		Port:       serv_port,
-		IpAddr:     serv_ip,
-		KnativeDns: knative_dns,
-		Registry:   registry,
+		Port:           serv_port,
+		PrometheusPort: prometheus_port,
+		IpAddr:         serv_ip,
+		KnativeDns:     knative_dns,
+		Registry:       registry,
 	}
 
 	log.Info().Msg("Starting server...")

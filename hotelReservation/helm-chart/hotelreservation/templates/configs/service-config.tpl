@@ -8,6 +8,7 @@
     "ProfilePort": "8081",
     "ProfileMongoAddress": "mongodb-profile-{{ include "hotel-reservation.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.global.serviceDnsDomain }}:27019",
     "ProfileMemcAddress": {{ include "hotel-reservation.generateMemcAddr" (list . .Values.global.memcached.HACount "memcached-profile" 11213)}},
+    "PrometheusPort": "9090",
     "RatePort": "8084",
     "RateMongoAddress": "mongodb-rate-{{ include "hotel-reservation.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.global.serviceDnsDomain }}:27020",
     "RateMemcAddress": {{ include "hotel-reservation.generateMemcAddr" (list . .Values.global.memcached.HACount "memcached-rate" 11212)}},

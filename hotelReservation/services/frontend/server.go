@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	tracing_util "github.com/bjornleffler/tracing"
 	recommendation "github.com/harlow/go-micro-services/services/recommendation/proto"
 	reservation "github.com/harlow/go-micro-services/services/reservation/proto"
 	user "github.com/harlow/go-micro-services/services/user/proto"
@@ -32,6 +33,7 @@ type Server struct {
 	KnativeDns           string
 	IpAddr               string
 	Port                 int
+	PrometheusPort       int
 	Tracer               opentracing.Tracer
 	Registry             *registry.Client
 }
@@ -41,6 +43,9 @@ func (s *Server) Run() error {
 	if s.Port == 0 {
 		return fmt.Errorf("Server port must be set")
 	}
+
+	// Configure Prometheus exports and tracing.
+	tracing_util.Configure("frontend", s.PrometheusPort)
 
 	log.Info().Msg("Initializing gRPC clients...")
 	if err := s.initSearchClient("srv-search"); err != nil {
@@ -152,8 +157,11 @@ func (s *Server) getGprcConn(name string) (*grpc.ClientConn, error) {
 }
 
 func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	ctx := r.Context()
+	serverSpan := tracing_util.StartServerSpan(ctx, "Search")
+	defer serverSpan.Finish()
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	log.Trace().Msg("starts searchHandler")
 
@@ -180,12 +188,14 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Trace().Msgf("SEARCH [lat: %v, lon: %v, inDate: %v, outDate: %v", lat, lon, inDate, outDate)
 	// search for best hotels
+	clientSpan := tracing_util.StartClientSpan(ctx, serverSpan, "search", "Nearby")
 	searchResp, err := s.searchClient.Nearby(ctx, &search.NearbyRequest{
 		Lat:     lat,
 		Lon:     lon,
 		InDate:  inDate,
 		OutDate: outDate,
 	})
+	clientSpan.Finish()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -202,6 +212,7 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 		locale = "en"
 	}
 
+	clientSpan = tracing_util.StartClientSpan(ctx, serverSpan, "reservation", "CheckAvailability")
 	reservationResp, err := s.reservationClient.CheckAvailability(ctx, &reservation.Request{
 		CustomerName: "",
 		HotelId:      searchResp.HotelIds,
@@ -209,6 +220,7 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 		OutDate:      outDate,
 		RoomNumber:   1,
 	})
+	clientSpan.Finish()
 	if err != nil {
 		log.Error().Msg("SearchHandler CheckAvailability failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -219,10 +231,12 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 	log.Trace().Msgf("searchHandler gets reserveResp.HotelId = %s", reservationResp.HotelId)
 
 	// hotel profiles
+	clientSpan = tracing_util.StartClientSpan(ctx, serverSpan, "profile", "GetProfiles")
 	profileResp, err := s.profileClient.GetProfiles(ctx, &profile.Request{
 		HotelIds: reservationResp.HotelId,
 		Locale:   locale,
 	})
+	clientSpan.Finish()
 	if err != nil {
 		log.Error().Msg("SearchHandler GetProfiles failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -235,8 +249,10 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) recommendHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	ctx := r.Context()
+	serverSpan := tracing_util.StartServerSpan(ctx, "Recommend")
+	defer serverSpan.Finish()
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	sLat, sLon := r.URL.Query().Get("lat"), r.URL.Query().Get("lon")
 	if sLat == "" || sLon == "" {
@@ -255,11 +271,13 @@ func (s *Server) recommendHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// recommend hotels
+	clientSpan := tracing_util.StartClientSpan(ctx, serverSpan, "recommendation", "GetRecommendations")
 	recResp, err := s.recommendationClient.GetRecommendations(ctx, &recommendation.Request{
 		Require: require,
 		Lat:     float64(lat),
 		Lon:     float64(lon),
 	})
+	clientSpan.Finish()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -272,10 +290,12 @@ func (s *Server) recommendHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// hotel profiles
+	clientSpan = tracing_util.StartClientSpan(ctx, serverSpan, "profile", "GetProfiles")
 	profileResp, err := s.profileClient.GetProfiles(ctx, &profile.Request{
 		HotelIds: recResp.HotelIds,
 		Locale:   locale,
 	})
+	clientSpan.Finish()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -285,8 +305,10 @@ func (s *Server) recommendHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) userHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	ctx := r.Context()
+	serverSpan := tracing_util.StartServerSpan(ctx, "User")
+	defer serverSpan.Finish()
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	username, password := r.URL.Query().Get("username"), r.URL.Query().Get("password")
 	if username == "" || password == "" {
@@ -295,10 +317,12 @@ func (s *Server) userHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check username and password
+	clientSpan := tracing_util.StartClientSpan(ctx, serverSpan, "user", "CheckUser")
 	recResp, err := s.userClient.CheckUser(ctx, &user.Request{
 		Username: username,
 		Password: password,
 	})
+	clientSpan.Finish()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -317,8 +341,10 @@ func (s *Server) userHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reservationHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	ctx := r.Context()
+	serverSpan := tracing_util.StartServerSpan(ctx, "Reservation")
+	defer serverSpan.Finish()
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	inDate, outDate := r.URL.Query().Get("inDate"), r.URL.Query().Get("outDate")
 	if inDate == "" || outDate == "" {
@@ -356,10 +382,12 @@ func (s *Server) reservationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check username and password
+	clientSpan := tracing_util.StartClientSpan(ctx, serverSpan, "user", "CheckUser")
 	recResp, err := s.userClient.CheckUser(ctx, &user.Request{
 		Username: username,
 		Password: password,
 	})
+	clientSpan.Finish()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -371,6 +399,7 @@ func (s *Server) reservationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Make reservation
+	clientSpan = tracing_util.StartClientSpan(ctx, serverSpan, "reservation", "MakeReservation")
 	resResp, err := s.reservationClient.MakeReservation(ctx, &reservation.Request{
 		CustomerName: customerName,
 		HotelId:      []string{hotelId},
@@ -378,6 +407,7 @@ func (s *Server) reservationHandler(w http.ResponseWriter, r *http.Request) {
 		OutDate:      outDate,
 		RoomNumber:   int32(numberOfRoom),
 	})
+	clientSpan.Finish()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

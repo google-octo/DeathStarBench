@@ -10,6 +10,7 @@
   "ProfilePort": "8081",
   "ProfileMongoAddress": "mongodb-profile.hotel-res.svc.cluster.local:27019",
   "ProfileMemcAddress": "memcached-profile.hotel-res.svc.cluster.local:11213",
+  "PrometheusPort": "9090",
   "RateIP": "rate.hotel-res.svc.cluster.local",
   "RatePort": "8084",
   "RateMongoAddress": "mongodb-rate.hotel-res.svc.cluster.local:27020",
